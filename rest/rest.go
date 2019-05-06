@@ -22,6 +22,7 @@ func (rest REST) Start() error {
 	app.HandleMany("GET POST DELETE", "/topics", TopicsHandler)
 	app.HandleMany("GET PUT DELETE", "/topics/{topic:string}", TopicHandler)
 	app.HandleMany("GET PUT DELETE", "/topics/{topic:string}/{partition:string}", PartitionHandler)
+	app.HandleMany("GET", "/update/{topic:string}/{partition:string}", UpdateHandler)
 	app.Any("/ws", iris.FromStd(socket.GetHandler().Serve))
 	// profiling
 	app.Any("/debug/pprof/{action:path}", Profiler())
@@ -190,6 +191,76 @@ func PartitionHandler(ctx iris.Context) {
 	case "DELETE":
 		cache.Update(topic, partition, cache.RemovePartition)
 		respondWithJSON(ctx, nil, iris.StatusOK)
+	}
+}
+
+func UpdateHandler(ctx iris.Context) {
+	topic := ctx.Params().Get("topic")
+	partition := ctx.Params().Get("partition")
+	switch ctx.Method() {
+	case "GET":
+		timeout, err := strconv.ParseInt(ctx.URLParamDefault("timeout", "30"), 10, 32)
+		if err != nil {
+			respondWithError(ctx, err.Error(), iris.StatusBadRequest)
+			return
+		}
+		from, err := parseTimeString(ctx.URLParam("from"), "from")
+		if err != nil {
+			respondWithError(ctx, err.Error(), iris.StatusBadRequest)
+			return
+		}
+		l := socket.Listener{Topic: topic, Partition: partition, C: make(chan cache.Publication)}
+		defer close(l.C)
+		socket.Listen(&l)
+		defer socket.Unlisten(&l)
+
+		entries := cache.Get(topic, partition, from, nil, 1)
+		if len(entries) > 0 {
+			respondWithJSON(
+				ctx,
+				entries[0].Data,
+				iris.StatusOK,
+			)
+			break
+		}
+
+		t := time.NewTimer(time.Millisecond * time.Duration(timeout))
+		defer t.Stop()
+		done := false
+		for {
+			select {
+			case <-t.C:
+				done = true
+				respondWithJSON(
+					ctx,
+					nil,
+					iris.StatusNoContent,
+				)
+			case u := <-l.C:
+				if u.Topic != topic {
+					break
+				}
+				if u.Partition != partition {
+					break
+				}
+				if len(u.Entries) <= 0 {
+					break
+				}
+				entry := u.Entries[len(u.Entries) - 1]
+				if from != nil && entry.Timestamp.Before(*from) {
+					break
+				}
+				done = true
+				respondWithJSON(
+					ctx,
+					entry.Data,
+					iris.StatusOK,
+				)
+			}
+			if done {
+				break
+			}
+		}
 	}
 }
 

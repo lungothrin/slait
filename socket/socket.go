@@ -175,9 +175,20 @@ func (s *subscription) produce() {
 	}
 }
 
+type Listener struct {
+	Topic string
+	Partition string
+	C chan cache.Publication
+}
+
+func (l *Listener) shouldReceive(topic, partition string) bool {
+	return l.Topic == topic && l.Partition == partition
+}
+
 type Hub struct {
 	sync.RWMutex
 	subscriptions sync.Map
+	listeners sync.Map
 }
 
 func (h *Hub) unsubscribe(s *subscription) {
@@ -187,6 +198,14 @@ func (h *Hub) unsubscribe(s *subscription) {
 func (h *Hub) subscribe(s *subscription) {
 	h.subscriptions.Store(s, true)
 	h.dump(s)
+}
+
+func (h *Hub) unlisten(l *Listener) {
+	h.listeners.Delete(l)
+}
+
+func (h *Hub) listen(l *Listener) {
+	h.listeners.Store(l, true)
 }
 
 func (h *Hub) dump(s *subscription) {
@@ -229,6 +248,13 @@ func (h *Hub) run() {
 				sub := key.(*subscription)
 				if sub.shouldReceive(pub.Topic, pub.Partition) {
 					sub.conn.Send(pub)
+				}
+				return true
+			})
+			h.listeners.Range(func(key interface{}, value interface{}) bool {
+				l := key.(*Listener)
+				if l.shouldReceive(pub.Topic, pub.Partition) {
+					l.C <-*pub
 				}
 				return true
 			})
@@ -278,6 +304,14 @@ func (h *Hub) run() {
 
 var hub = Hub{
 	subscriptions: sync.Map{},
+}
+
+func Listen(l *Listener) {
+	hub.listen(l)
+}
+
+func Unlisten(l *Listener) {
+	hub.unlisten(l)
 }
 
 type SocketHandler struct{}
